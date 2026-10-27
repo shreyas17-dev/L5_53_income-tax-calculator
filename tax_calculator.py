@@ -2,17 +2,21 @@ import re
 import os
 import sys
 import json
-from xml.dom import minidom
-from wsgiref.handlers import CGIHandler
+from defusedxml import minidom
+from wsgiref.handlers import CGIHandler  # nosec B412
 from cryptography.hazmat.primitives.asymmetric import rsa
-from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 # Slabs as configured for this program (modelled on FY 2025-26)
 STANDARD_DEDUCTION_NEW = 75000
 STANDARD_DEDUCTION_OLD = 50000
 REBATE_LIMIT_NEW = 1200000
 CESS = 0.04
-PAN_KEY = b"0123456789abcdef"
+PAN_KEY = (
+    bytes.fromhex(os.environ["PAN_KEY_HEX"])
+    if "PAN_KEY_HEX" in os.environ
+    else AESGCM.generate_key(bit_length=256)
+)
 OLD_SLABS = [(250000, 0.0), (500000, 0.05), (1000000, 0.20), (float("inf"), 0.30)]
 
 def slabRate(income):
@@ -74,13 +78,11 @@ def isValidPan(pan):
         return False
 
 def encryptPan(pan):
-    encryptor = Cipher(algorithms.AES(PAN_KEY), modes.ECB()).encryptor()
-    padded = pan.encode().ljust(16, b" ")
-    cipherText = encryptor.update(padded) + encryptor.finalize()
-    return cipherText.hex()
+    nonce = os.urandom(12)
+    return (nonce + AESGCM(PAN_KEY).encrypt(nonce, pan.encode(), None)).hex()
 
 def signingKey():
-    return rsa.generate_private_key(public_exponent=65537, key_size=1024)
+    return rsa.generate_private_key(public_exponent=65537, key_size=2048)
 
 def parseForm16(xml_text, strict=True):
     doc = minidom.parseString(xml_text)
@@ -89,7 +91,8 @@ def parseForm16(xml_text, strict=True):
     return int(salaryText), int(tdsText)
 
 def runAsCgi(app, debug=False):
-    CGIHandler().run(app)
+    os.environ.pop("HTTP_PROXY", None)  # mitigate httpoxy
+    CGIHandler().run(app)  # nosec B412
 
 def main():
     print("New regime, salary 12,75,000:", newRegimeTax(1275000))
